@@ -170,17 +170,6 @@ static int valid_shared_filename(const char *name)
 	return 1;
 }
 
-static int valid_shared_dirname(const char *name)
-{
-	if (!name[0]) return 0;
-	if (!strcmp(name, "/")) return 1;
-	if (!strcmp(name, "\\")) return 1;
-	if (strstr(name, "..")) return 0;
-	if (strchr(name, '/')) return 0;
-	if (strchr(name, '\\')) return 0;
-	return 1;
-}
-
 static void normalize_shared_filename(char *name)
 {
 	for (size_t i = 0; name[i]; i++)
@@ -249,13 +238,78 @@ static int resolve_shared_filename(const char *basepath, const char *name, char 
 	return 0;
 }
 
-static int resolve_shared_directory(const char *basepath, const char *name, char *path, size_t path_size)
+static int append_path_component(char *path, size_t path_size, const char *component)
 {
-	snprintf(path, path_size, "%s/%s", basepath, name);
+	size_t used = strlen(path);
+	size_t len = strlen(component);
+	if (!len) return 1;
+	if (used + len + (used ? 1 : 0) >= path_size) return 0;
+
+	if (used)
+		path[used++] = '/';
+
+	memcpy(path + used, component, len + 1);
+	return 1;
+}
+
+static int pop_path_component(char *path)
+{
+	char *slash = strrchr(path, '/');
+	if (slash)
+	{
+		*slash = 0;
+		return 1;
+	}
+
+	if (path[0])
+	{
+		path[0] = 0;
+		return 1;
+	}
+
+	return 0;
+}
+
+static int split_next_path_component(const char **cursor, char *component, size_t component_size)
+{
+	const char *start = *cursor;
+	while (*start == '/' || *start == '\\')
+		start++;
+
+	if (!*start)
+	{
+		*cursor = start;
+		return 0;
+	}
+
+	const char *end = start;
+	while (*end && *end != '/' && *end != '\\')
+		end++;
+
+	size_t len = end - start;
+	if (len >= component_size)
+		len = component_size - 1;
+
+	memcpy(component, start, len);
+	component[len] = 0;
+	*cursor = end;
+	return 1;
+}
+
+static int resolve_shared_directory_component(const char *basepath, const char *component, char *resolved, size_t resolved_size)
+{
+	if (!component[0] || strchr(component, '/') || strchr(component, '\\'))
+		return 0;
+
+	char path[1200];
+	snprintf(path, sizeof(path), "%s/%s", basepath, component);
 
 	struct stat st;
 	if (!stat(path, &st) && S_ISDIR(st.st_mode))
+	{
+		snprintf(resolved, resolved_size, "%s", component);
 		return 1;
+	}
 
 	DIR *dir = opendir(basepath);
 	if (!dir) return 0;
@@ -263,16 +317,61 @@ static int resolve_shared_directory(const char *basepath, const char *name, char
 	struct dirent *entry;
 	while ((entry = readdir(dir)))
 	{
-		if (!strcasecmp(entry->d_name, name))
+		if (!strcasecmp(entry->d_name, component))
 		{
-			snprintf(path, path_size, "%s/%s", basepath, entry->d_name);
-			closedir(dir);
-			return !stat(path, &st) && S_ISDIR(st.st_mode);
+			snprintf(path, sizeof(path), "%s/%s", basepath, entry->d_name);
+			if (!stat(path, &st) && S_ISDIR(st.st_mode))
+			{
+				snprintf(resolved, resolved_size, "%s", entry->d_name);
+				closedir(dir);
+				return 1;
+			}
 		}
 	}
 
 	closedir(dir);
 	return 0;
+}
+
+static int resolve_shared_relative_dir(const char *requested, char *resolved, size_t resolved_size)
+{
+	char candidate[1024] = {};
+	if (requested[0] != '/' && requested[0] != '\\')
+		snprintf(candidate, sizeof(candidate), "%s", current_dir);
+
+	const char *cursor = requested;
+	char component[256];
+	while (split_next_path_component(&cursor, component, sizeof(component)))
+	{
+		if (!strcmp(component, "."))
+		{
+			continue;
+		}
+		else if (!strcmp(component, ".."))
+		{
+			if (!pop_path_component(candidate))
+				return 0;
+		}
+		else
+		{
+			char basepath[1200];
+			const char *root = shared_basepath();
+			if (candidate[0])
+				snprintf(basepath, sizeof(basepath), "%s/%s", root, candidate);
+			else
+				snprintf(basepath, sizeof(basepath), "%s", root);
+
+			char resolved_component[256];
+			if (!resolve_shared_directory_component(basepath, component, resolved_component, sizeof(resolved_component)))
+				return 0;
+
+			if (!append_path_component(candidate, sizeof(candidate), resolved_component))
+				return 0;
+		}
+	}
+
+	snprintf(resolved, resolved_size, "%s", candidate);
+	return 1;
 }
 
 static uint16_t le16(const uint8_t *data)
@@ -626,39 +725,21 @@ static void build_cd_response(const char *name, char *response, size_t response_
 {
 	response[0] = 0;
 
-	if (!name[0] || !strcmp(name, "/") || !strcmp(name, "\\"))
+	if (!name[0])
 	{
 		current_dir[0] = 0;
 		append_current_dir(response, response_size);
 		return;
 	}
 
-	if (!valid_shared_dirname(name))
-	{
-		snprintf(response, response_size, "BAD DIRECTORY\n");
-		return;
-	}
-
-	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
-
-	char path[1200];
-	if (!resolve_shared_directory(basepath, name, path, sizeof(path)))
+	char resolved[1024];
+	if (!resolve_shared_relative_dir(name, resolved, sizeof(resolved)))
 	{
 		snprintf(response, response_size, "NO SUCH DIRECTORY: %s\n", name);
 		return;
 	}
 
-	const char *resolved_name = strrchr(path, '/');
-	resolved_name = resolved_name ? resolved_name + 1 : name;
-
-	char next_dir[1024];
-	if (current_dir[0])
-		snprintf(next_dir, sizeof(next_dir), "%s/%s", current_dir, resolved_name);
-	else
-		snprintf(next_dir, sizeof(next_dir), "%s", resolved_name);
-
-	snprintf(current_dir, sizeof(current_dir), "%s", next_dir);
+	snprintf(current_dir, sizeof(current_dir), "%s", resolved);
 	append_current_dir(response, response_size);
 }
 
