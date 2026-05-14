@@ -170,6 +170,17 @@ static void append_request_hex(char *response, size_t response_size, const char 
 	snprintf(response + used, response_size - used, "\n");
 }
 
+static void append_hex_byte(char *response, size_t response_size, uint8_t value)
+{
+	static const char hex[] = "0123456789ABCDEF";
+	size_t used = strlen(response);
+	if (used >= response_size - 3) return;
+
+	response[used++] = hex[value >> 4];
+	response[used++] = hex[value & 0x0F];
+	response[used] = 0;
+}
+
 static int resolve_shared_filename(const char *basepath, const char *name, char *path, size_t path_size)
 {
 	snprintf(path, path_size, "%s/%s", basepath, name);
@@ -231,6 +242,64 @@ static void build_type_response(const char *name, char *response, size_t respons
 	fclose(file);
 }
 
+static void build_dump_response(const char *name, char *response, size_t response_size)
+{
+	response[0] = 0;
+	const char *basepath = shared_basepath();
+
+	if (!valid_shared_filename(name))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
+
+	char path[1200];
+	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
+	{
+		snprintf(response, response_size, "OPEN FAILED: %s\nBASE=%s\nPATH=%s/%s\n", name, basepath, basepath, name);
+		append_request_hex(response, response_size, name);
+		return;
+	}
+
+	FILE *file = fopen(path, "rb");
+	if (!file)
+	{
+		snprintf(response, response_size, "OPEN FAILED: %s\nPATH=%s\nERRNO=%d\n", name, path, errno);
+		append_request_hex(response, response_size, name);
+		return;
+	}
+
+	uint8_t bytes[16];
+	size_t offset = 0;
+	while (strlen(response) < response_size - 80)
+	{
+		size_t count = fread(bytes, 1, sizeof(bytes), file);
+		if (!count) break;
+
+		size_t used = strlen(response);
+		snprintf(response + used, response_size - used, "%04X:", (unsigned int)offset);
+
+		for (size_t i = 0; i < count; i++)
+		{
+			used = strlen(response);
+			snprintf(response + used, response_size - used, " ");
+			append_hex_byte(response, response_size, bytes[i]);
+		}
+
+		used = strlen(response);
+		snprintf(response + used, response_size - used, "\n");
+		offset += count;
+	}
+
+	if (!feof(file))
+	{
+		size_t used = strlen(response);
+		snprintf(response + used, response_size - used, "... TRUNCATED\n");
+	}
+
+	fclose(file);
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -257,7 +326,10 @@ static int process_host_request()
 	}
 	else
 	{
-		build_type_response(request, response, sizeof(response));
+		if (!strncmp(request, "D:", 2))
+			build_dump_response(request + 2, response, sizeof(response));
+		else
+			build_type_response(request, response, sizeof(response));
 	}
 
 	send_listing(response);
