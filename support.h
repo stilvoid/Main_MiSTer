@@ -25,6 +25,9 @@
 // MegaDrive  support
 #include "support/megadrive/mdplus.h"
 
+// Amstrad support
+#include "support/amstrad/amstrad_m4s.h"
+
 // N64  support
 #include "support/n64/n64.h"
 #include "support/n64/n64_joy_emu.h"

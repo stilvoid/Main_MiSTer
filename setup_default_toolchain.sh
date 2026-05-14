@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 if [ "${BASH_SOURCE[0]}" -ef "$0" ]
 then
@@ -20,7 +21,7 @@ fi
 GCC_PACKAGE_NAME=gcc-arm-$MISTER_GCC_VER-$MISTER_GCC_HOST_ARCH-arm-none-linux-gnueabihf
 GCC_DIR=$MISTER_GCC_INSTALL_DIR/$GCC_PACKAGE_NAME
 
-if [ ! -d $GCC_DIR ]; then
+if [ ! -d "$GCC_DIR" ]; then
 	echo "Downloading $GCC_PACKAGE_NAME..."
 	GCC_TARBALL=$GCC_PACKAGE_NAME.tar.xz
 	wget --no-check-certificate -c https://developer.arm.com/-/media/Files/downloads/gnu-a/$MISTER_GCC_VER/binrel/$GCC_TARBALL
@@ -29,7 +30,12 @@ if [ ! -d $GCC_DIR ]; then
 fi
 
 echo "Setting environment variables..."
-export CC=$GCC_DIR/bin/arm-none-gnueabihf-gcc
+export CC=$GCC_DIR/bin/arm-none-linux-gnueabihf-gcc
 export PATH="$GCC_DIR/bin:$PATH"
+
+if [ ! -x "$CC" ]; then
+	echo "error: toolchain compiler not found: $CC"
+	return 1
+fi
 
 echo "Done!"
