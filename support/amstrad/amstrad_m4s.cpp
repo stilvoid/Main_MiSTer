@@ -17,9 +17,11 @@
 #define CMD_M4S_REQ_STATUS 0x72
 #define CMD_M4S_REQ_READ 0x73
 #define CMD_M4S_REQ_ACK 0x74
+#define CMD_M4S_RESP_DONE 0x77
 
 #define M4S_INDEX_SIZE 2048
 #define M4S_REQUEST_SIZE 256
+#define M4S_LOAD_CHUNK_SIZE 512
 static unsigned long request_timer = 0;
 
 static int is_amstrad_core()
@@ -96,20 +98,26 @@ static void build_listing(char *listing, size_t listing_size)
 	closedir(dir);
 }
 
-static void send_listing(const char *listing)
+static void send_response(const uint8_t *data, size_t len)
 {
 	spi_uio_cmd(CMD_M4S_DIR_BEGIN);
 
 	spi_uio_cmd_cont(CMD_M4S_DIR_WRITE);
 
+	for (size_t i = 0; i < len; i++)
+		spi_w(data[i]);
+
+	DisableIO();
+
+	spi_uio_cmd(CMD_M4S_RESP_DONE);
+}
+
+static void send_listing(const char *listing)
+{
 	size_t len = strlen(listing);
 	if (len > M4S_INDEX_SIZE - 1) len = M4S_INDEX_SIZE - 1;
 
-	for (size_t i = 0; i < len; i++)
-		spi_w((uint8_t)listing[i]);
-
-	spi_w(0);
-	DisableIO();
+	send_response((const uint8_t *)listing, len + 1);
 }
 
 static uint16_t request_status()
@@ -300,6 +308,70 @@ static void build_dump_response(const char *name, char *response, size_t respons
 	fclose(file);
 }
 
+static int parse_hex_nibble(char value)
+{
+	if (value >= '0' && value <= '9') return value - '0';
+	if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+	if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+	return -1;
+}
+
+static int parse_hex16(const char *text, uint16_t *value)
+{
+	uint16_t parsed = 0;
+	for (int i = 0; i < 4; i++)
+	{
+		int nibble = parse_hex_nibble(text[i]);
+		if (nibble < 0) return 0;
+		parsed = (parsed << 4) | nibble;
+	}
+
+	*value = parsed;
+	return 1;
+}
+
+static size_t build_load_response(const char *request, uint8_t *response, size_t response_size)
+{
+	response[0] = 0;
+	response[1] = 0;
+
+	if (request[0] != 'L' || request[1] != ':' || request[6] != ':')
+		return 2;
+
+	uint16_t offset = 0;
+	if (!parse_hex16(request + 2, &offset))
+		return 2;
+
+	const char *name = request + 7;
+	if (!valid_shared_filename(name))
+		return 2;
+
+	const char *basepath = shared_basepath();
+	char path[1200];
+	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
+		return 2;
+
+	FILE *file = fopen(path, "rb");
+	if (!file)
+		return 2;
+
+	if (fseek(file, offset, SEEK_SET))
+	{
+		fclose(file);
+		return 2;
+	}
+
+	size_t max_count = M4S_LOAD_CHUNK_SIZE;
+	if (max_count > response_size - 2) max_count = response_size - 2;
+
+	size_t count = fread(response + 2, 1, max_count, file);
+	fclose(file);
+
+	response[0] = count & 0xFF;
+	response[1] = (count >> 8) & 0xFF;
+	return count + 2;
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -319,20 +391,25 @@ static int process_host_request()
 
 	request_ack();
 
-	char response[M4S_INDEX_SIZE];
-	if (len == 0)
+	if (!strncmp(request, "L:", 2))
 	{
-		build_listing(response, sizeof(response));
+		uint8_t response[M4S_INDEX_SIZE];
+		size_t response_len = build_load_response(request, response, sizeof(response));
+		send_response(response, response_len);
 	}
 	else
 	{
-		if (!strncmp(request, "D:", 2))
+		char response[M4S_INDEX_SIZE];
+		if (len == 0)
+			build_listing(response, sizeof(response));
+		else if (!strncmp(request, "D:", 2))
 			build_dump_response(request + 2, response, sizeof(response));
 		else
 			build_type_response(request, response, sizeof(response));
+
+		send_listing(response);
 	}
 
-	send_listing(response);
 	return 1;
 }
 
