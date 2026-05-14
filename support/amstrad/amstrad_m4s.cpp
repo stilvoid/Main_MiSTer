@@ -170,6 +170,13 @@ static int valid_shared_filename(const char *name)
 	return 1;
 }
 
+static int valid_shared_save_filename(const char *name)
+{
+	if (!valid_shared_filename(name)) return 0;
+	if (strchr(name, ':')) return 0;
+	return 1;
+}
+
 static void normalize_shared_filename(char *name)
 {
 	for (size_t i = 0; name[i]; i++)
@@ -598,6 +605,20 @@ static int parse_hex16(const char *text, uint16_t *value)
 	return 1;
 }
 
+static int parse_hex8(const char *text, uint8_t *value)
+{
+	uint8_t parsed = 0;
+	for (int i = 0; i < 2; i++)
+	{
+		int nibble = parse_hex_nibble(text[i]);
+		if (nibble < 0) return 0;
+		parsed = (parsed << 4) | nibble;
+	}
+
+	*value = parsed;
+	return 1;
+}
+
 static size_t build_load_response(const char *request, uint8_t *response, size_t response_size)
 {
 	response[0] = 0;
@@ -721,6 +742,104 @@ static size_t build_header_load_response(const char *request, uint8_t *response,
 	return count + 7;
 }
 
+static void build_save_response(const char *request, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	if (request[0] != 'S' || request[1] != ':' || request[6] != ':' || request[9] != ':')
+	{
+		snprintf(response, response_size, "BAD SAVE REQUEST\n");
+		return;
+	}
+
+	uint16_t offset = 0;
+	uint8_t count = 0;
+	if (!parse_hex16(request + 2, &offset) || !parse_hex8(request + 7, &count))
+	{
+		snprintf(response, response_size, "BAD SAVE OFFSET\n");
+		return;
+	}
+
+	const char *name = request + 10;
+	const char *separator = strchr(name, ':');
+	if (!separator)
+	{
+		snprintf(response, response_size, "BAD SAVE NAME\n");
+		return;
+	}
+
+	size_t name_len = separator - name;
+	char filename[256];
+	if (!name_len || name_len >= sizeof(filename))
+	{
+		snprintf(response, response_size, "BAD SAVE NAME\n");
+		return;
+	}
+
+	memcpy(filename, name, name_len);
+	filename[name_len] = 0;
+	if (!valid_shared_save_filename(filename))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
+
+	const char *hex = separator + 1;
+	for (uint8_t i = 0; i < count; i++)
+	{
+		if (!hex[i * 2] || !hex[i * 2 + 1])
+		{
+			snprintf(response, response_size, "BAD SAVE DATA\n");
+			return;
+		}
+	}
+
+	uint8_t bytes[64];
+	if (count > sizeof(bytes))
+	{
+		snprintf(response, response_size, "SAVE CHUNK TOO LARGE\n");
+		return;
+	}
+
+	for (uint8_t i = 0; i < count; i++)
+	{
+		if (!parse_hex8(hex + (i * 2), bytes + i))
+		{
+			snprintf(response, response_size, "BAD SAVE DATA\n");
+			return;
+		}
+	}
+
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
+	char path[1200];
+	snprintf(path, sizeof(path), "%s/%s", basepath, filename);
+
+	FILE *file = fopen(path, offset ? "r+b" : "wb");
+	if (!file)
+	{
+		snprintf(response, response_size, "SAVE OPEN FAILED: %s\nERRNO=%d\n", filename, errno);
+		return;
+	}
+
+	if (fseek(file, offset, SEEK_SET))
+	{
+		fclose(file);
+		snprintf(response, response_size, "SAVE SEEK FAILED: %s\nERRNO=%d\n", filename, errno);
+		return;
+	}
+
+	size_t written = fwrite(bytes, 1, count, file);
+	fclose(file);
+	if (written != count)
+	{
+		snprintf(response, response_size, "SAVE WRITE FAILED: %s\n", filename);
+		return;
+	}
+
+	snprintf(response, response_size, "OK\n");
+}
+
 static void build_cd_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
@@ -785,6 +904,8 @@ static int process_host_request()
 			build_info_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "D:", 2))
 			build_dump_response(request + 2, response, sizeof(response));
+		else if (!strncmp(request, "S:", 2))
+			build_save_response(request, response, sizeof(response));
 		else
 			build_type_response(request, response, sizeof(response));
 
