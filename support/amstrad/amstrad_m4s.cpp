@@ -218,6 +218,16 @@ static int resolve_shared_filename(const char *basepath, const char *name, char 
 	return 0;
 }
 
+static uint16_t le16(const uint8_t *data)
+{
+	return data[0] | (data[1] << 8);
+}
+
+static uint32_t le24(const uint8_t *data)
+{
+	return data[0] | (data[1] << 8) | (data[2] << 16);
+}
+
 static void build_type_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
@@ -248,6 +258,105 @@ static void build_type_response(const char *name, char *response, size_t respons
 	size_t used = fread(response, 1, response_size - 1, file);
 	response[used] = 0;
 	fclose(file);
+}
+
+static void append_amsdos_name(char *response, size_t response_size, const uint8_t *header)
+{
+	size_t used = strlen(response);
+	if (used >= response_size - 1) return;
+
+	used += snprintf(response + used, response_size - used, "AMSDOS NAME: ");
+
+	for (int i = 1; i <= 8 && used < response_size - 1; i++)
+	{
+		if (header[i] == ' ') break;
+		response[used++] = header[i];
+	}
+
+	if (used < response_size - 1)
+		response[used++] = '.';
+
+	for (int i = 9; i <= 11 && used < response_size - 1; i++)
+	{
+		if (header[i] == ' ') break;
+		response[used++] = header[i];
+	}
+
+	if (used < response_size - 2)
+	{
+		response[used++] = '\n';
+		response[used] = 0;
+	}
+}
+
+static void build_info_response(const char *name, char *response, size_t response_size)
+{
+	response[0] = 0;
+	const char *basepath = shared_basepath();
+
+	if (!valid_shared_filename(name))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
+
+	char path[1200];
+	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
+	{
+		snprintf(response, response_size, "OPEN FAILED: %s\nBASE=%s\nPATH=%s/%s\n", name, basepath, basepath, name);
+		append_request_hex(response, response_size, name);
+		return;
+	}
+
+	struct stat st;
+	long file_size = !stat(path, &st) ? (long)st.st_size : -1;
+
+	FILE *file = fopen(path, "rb");
+	if (!file)
+	{
+		snprintf(response, response_size, "OPEN FAILED: %s\nPATH=%s\nERRNO=%d\n", name, path, errno);
+		append_request_hex(response, response_size, name);
+		return;
+	}
+
+	uint8_t header[128] = {};
+	size_t count = fread(header, 1, sizeof(header), file);
+	fclose(file);
+
+	snprintf(response, response_size, "FILE: %s\nSIZE: %ld\n", name, file_size);
+
+	if (count < sizeof(header))
+	{
+		size_t used = strlen(response);
+		snprintf(response + used, response_size - used, "AMSDOS: NO HEADER\n");
+		return;
+	}
+
+	uint16_t checksum = 0;
+	for (int i = 0; i <= 66; i++)
+		checksum += header[i];
+
+	uint16_t stored_checksum = le16(header + 67);
+	if (checksum != stored_checksum)
+	{
+		size_t used = strlen(response);
+		snprintf(response + used, response_size - used,
+		         "AMSDOS: NO HEADER\nCHECKSUM: %04X EXPECTED %04X\n",
+		         stored_checksum, checksum);
+		return;
+	}
+
+	append_amsdos_name(response, response_size, header);
+
+	size_t used = strlen(response);
+	snprintf(response + used, response_size - used,
+	         "AMSDOS: HEADER OK\nTYPE: %02X\nDATA LEN: %u\nLOAD: &%04X\nLOGICAL LEN: %u\nENTRY: &%04X\nREAL LEN: %lu\n",
+	         header[18],
+	         le16(header + 19),
+	         le16(header + 21),
+	         le16(header + 24),
+	         le16(header + 26),
+	         (unsigned long)le24(header + 64));
 }
 
 static void build_dump_response(const char *name, char *response, size_t response_size)
@@ -372,6 +481,85 @@ static size_t build_load_response(const char *request, uint8_t *response, size_t
 	return count + 2;
 }
 
+static int read_amsdos_header(const char *name, uint8_t *header, char *path, size_t path_size)
+{
+	if (!valid_shared_filename(name))
+		return 0;
+
+	const char *basepath = shared_basepath();
+	if (!resolve_shared_filename(basepath, name, path, path_size))
+		return 0;
+
+	FILE *file = fopen(path, "rb");
+	if (!file)
+		return 0;
+
+	size_t count = fread(header, 1, 128, file);
+	fclose(file);
+	if (count != 128)
+		return 0;
+
+	uint16_t checksum = 0;
+	for (int i = 0; i <= 66; i++)
+		checksum += header[i];
+
+	return checksum == le16(header + 67);
+}
+
+static size_t build_header_load_response(const char *request, uint8_t *response, size_t response_size)
+{
+	for (int i = 0; i < 7; i++)
+		response[i] = 0;
+
+	if (request[0] != 'H' || request[1] != ':' || request[6] != ':')
+		return 7;
+
+	uint16_t offset = 0;
+	if (!parse_hex16(request + 2, &offset))
+		return 7;
+
+	const char *name = request + 7;
+	uint8_t header[128] = {};
+	char path[1200];
+	if (!read_amsdos_header(name, header, path, sizeof(path)))
+		return 7;
+
+	uint16_t logical_len = le16(header + 24);
+	uint16_t load_addr = le16(header + 21);
+	uint16_t entry_addr = le16(header + 26);
+
+	response[2] = load_addr & 0xFF;
+	response[3] = load_addr >> 8;
+	response[4] = entry_addr & 0xFF;
+	response[5] = entry_addr >> 8;
+	response[6] = header[18];
+
+	if (offset >= logical_len)
+		return 7;
+
+	FILE *file = fopen(path, "rb");
+	if (!file)
+		return 7;
+
+	if (fseek(file, 128 + offset, SEEK_SET))
+	{
+		fclose(file);
+		return 7;
+	}
+
+	size_t max_count = M4S_LOAD_CHUNK_SIZE;
+	size_t remaining = logical_len - offset;
+	if (max_count > remaining) max_count = remaining;
+	if (max_count > response_size - 7) max_count = response_size - 7;
+
+	size_t count = fread(response + 7, 1, max_count, file);
+	fclose(file);
+
+	response[0] = count & 0xFF;
+	response[1] = count >> 8;
+	return count + 7;
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -391,7 +579,13 @@ static int process_host_request()
 
 	request_ack();
 
-	if (!strncmp(request, "L:", 2))
+	if (!strncmp(request, "H:", 2))
+	{
+		uint8_t response[M4S_INDEX_SIZE];
+		size_t response_len = build_header_load_response(request, response, sizeof(response));
+		send_response(response, response_len);
+	}
+	else if (!strncmp(request, "L:", 2))
 	{
 		uint8_t response[M4S_INDEX_SIZE];
 		size_t response_len = build_load_response(request, response, sizeof(response));
@@ -402,6 +596,8 @@ static int process_host_request()
 		char response[M4S_INDEX_SIZE];
 		if (len == 0)
 			build_listing(response, sizeof(response));
+		else if (!strncmp(request, "I:", 2))
+			build_info_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "D:", 2))
 			build_dump_response(request + 2, response, sizeof(response));
 		else
