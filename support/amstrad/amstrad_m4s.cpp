@@ -23,6 +23,7 @@
 #define M4S_REQUEST_SIZE 256
 #define M4S_LOAD_CHUNK_SIZE 512
 static unsigned long request_timer = 0;
+static char current_dir[1024] = {};
 
 static int is_amstrad_core()
 {
@@ -59,6 +60,23 @@ static const char *shared_basepath()
 	return basepath;
 }
 
+static void shared_current_path(char *path, size_t path_size)
+{
+	const char *basepath = shared_basepath();
+	if (current_dir[0])
+		snprintf(path, path_size, "%s/%s", basepath, current_dir);
+	else
+		snprintf(path, path_size, "%s", basepath);
+}
+
+static void append_current_dir(char *response, size_t response_size)
+{
+	size_t used = strlen(response);
+	if (used >= response_size - 1) return;
+
+	snprintf(response + used, response_size - used, "CWD: /%s\n", current_dir);
+}
+
 static void append_listing(char *listing, size_t listing_size, const char *name, int is_dir)
 {
 	size_t used = strlen(listing);
@@ -69,7 +87,8 @@ static void append_listing(char *listing, size_t listing_size, const char *name,
 
 static void build_listing(char *listing, size_t listing_size)
 {
-	const char *basepath = shared_basepath();
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
 	DIR *dir = opendir(basepath);
 
 	listing[0] = 0;
@@ -80,6 +99,7 @@ static void build_listing(char *listing, size_t listing_size)
 	}
 
 	append_listing(listing, listing_size, "M4S SHARED", 0);
+	append_current_dir(listing, listing_size);
 
 	struct dirent *entry;
 	while ((entry = readdir(dir)))
@@ -144,6 +164,17 @@ static void request_ack()
 static int valid_shared_filename(const char *name)
 {
 	if (!name[0]) return 0;
+	if (strstr(name, "..")) return 0;
+	if (strchr(name, '/')) return 0;
+	if (strchr(name, '\\')) return 0;
+	return 1;
+}
+
+static int valid_shared_dirname(const char *name)
+{
+	if (!name[0]) return 0;
+	if (!strcmp(name, "/")) return 1;
+	if (!strcmp(name, "\\")) return 1;
 	if (strstr(name, "..")) return 0;
 	if (strchr(name, '/')) return 0;
 	if (strchr(name, '\\')) return 0;
@@ -218,6 +249,32 @@ static int resolve_shared_filename(const char *basepath, const char *name, char 
 	return 0;
 }
 
+static int resolve_shared_directory(const char *basepath, const char *name, char *path, size_t path_size)
+{
+	snprintf(path, path_size, "%s/%s", basepath, name);
+
+	struct stat st;
+	if (!stat(path, &st) && S_ISDIR(st.st_mode))
+		return 1;
+
+	DIR *dir = opendir(basepath);
+	if (!dir) return 0;
+
+	struct dirent *entry;
+	while ((entry = readdir(dir)))
+	{
+		if (!strcasecmp(entry->d_name, name))
+		{
+			snprintf(path, path_size, "%s/%s", basepath, entry->d_name);
+			closedir(dir);
+			return !stat(path, &st) && S_ISDIR(st.st_mode);
+		}
+	}
+
+	closedir(dir);
+	return 0;
+}
+
 static uint16_t le16(const uint8_t *data)
 {
 	return data[0] | (data[1] << 8);
@@ -231,7 +288,8 @@ static uint32_t le24(const uint8_t *data)
 static void build_type_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
-	const char *basepath = shared_basepath();
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
 
 	if (!valid_shared_filename(name))
 	{
@@ -292,7 +350,8 @@ static void append_amsdos_name(char *response, size_t response_size, const uint8
 static void build_info_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
-	const char *basepath = shared_basepath();
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
 
 	if (!valid_shared_filename(name))
 	{
@@ -362,7 +421,8 @@ static void build_info_response(const char *name, char *response, size_t respons
 static void build_dump_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
-	const char *basepath = shared_basepath();
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
 
 	if (!valid_shared_filename(name))
 	{
@@ -455,7 +515,8 @@ static size_t build_load_response(const char *request, uint8_t *response, size_t
 	if (!valid_shared_filename(name))
 		return 2;
 
-	const char *basepath = shared_basepath();
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
 	char path[1200];
 	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
 		return 2;
@@ -486,7 +547,8 @@ static int read_amsdos_header(const char *name, uint8_t *header, char *path, siz
 	if (!valid_shared_filename(name))
 		return 0;
 
-	const char *basepath = shared_basepath();
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
 	if (!resolve_shared_filename(basepath, name, path, path_size))
 		return 0;
 
@@ -560,6 +622,46 @@ static size_t build_header_load_response(const char *request, uint8_t *response,
 	return count + 7;
 }
 
+static void build_cd_response(const char *name, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	if (!name[0] || !strcmp(name, "/") || !strcmp(name, "\\"))
+	{
+		current_dir[0] = 0;
+		append_current_dir(response, response_size);
+		return;
+	}
+
+	if (!valid_shared_dirname(name))
+	{
+		snprintf(response, response_size, "BAD DIRECTORY\n");
+		return;
+	}
+
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
+
+	char path[1200];
+	if (!resolve_shared_directory(basepath, name, path, sizeof(path)))
+	{
+		snprintf(response, response_size, "NO SUCH DIRECTORY: %s\n", name);
+		return;
+	}
+
+	const char *resolved_name = strrchr(path, '/');
+	resolved_name = resolved_name ? resolved_name + 1 : name;
+
+	char next_dir[1024];
+	if (current_dir[0])
+		snprintf(next_dir, sizeof(next_dir), "%s/%s", current_dir, resolved_name);
+	else
+		snprintf(next_dir, sizeof(next_dir), "%s", resolved_name);
+
+	snprintf(current_dir, sizeof(current_dir), "%s", next_dir);
+	append_current_dir(response, response_size);
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -596,6 +698,8 @@ static int process_host_request()
 		char response[M4S_INDEX_SIZE];
 		if (len == 0)
 			build_listing(response, sizeof(response));
+		else if (!strncmp(request, "C:", 2))
+			build_cd_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "I:", 2))
 			build_info_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "D:", 2))
