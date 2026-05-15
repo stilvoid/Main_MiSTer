@@ -162,10 +162,11 @@ static void request_ack()
 	spi_uio_cmd(CMD_M4S_REQ_ACK);
 }
 
-static int valid_shared_filename(const char *name)
+static int valid_shared_leafname(const char *name)
 {
 	if (!name[0]) return 0;
-	if (strstr(name, "..")) return 0;
+	if (!strcmp(name, ".")) return 0;
+	if (!strcmp(name, "..")) return 0;
 	if (strchr(name, '/')) return 0;
 	if (strchr(name, '\\')) return 0;
 	return 1;
@@ -173,7 +174,7 @@ static int valid_shared_filename(const char *name)
 
 static int valid_shared_save_filename(const char *name)
 {
-	if (!valid_shared_filename(name)) return 0;
+	if (!valid_shared_leafname(name)) return 0;
 	if (strchr(name, ':')) return 0;
 	return 1;
 }
@@ -217,6 +218,11 @@ static void append_hex_byte(char *response, size_t response_size, uint8_t value)
 	response[used] = 0;
 }
 
+static int append_path_component(char *path, size_t path_size, const char *component);
+static int pop_path_component(char *path);
+static int split_next_path_component(const char **cursor, char *component, size_t component_size);
+static int resolve_shared_directory_component(const char *basepath, const char *component, char *resolved, size_t resolved_size);
+
 static int resolve_shared_filename(const char *basepath, const char *name, char *path, size_t path_size)
 {
 	snprintf(path, path_size, "%s/%s", basepath, name);
@@ -244,6 +250,100 @@ static int resolve_shared_filename(const char *basepath, const char *name, char 
 
 	closedir(dir);
 	return 0;
+}
+
+static int resolve_shared_path_parent(const char *requested, char *dir, size_t dir_size, char *leaf, size_t leaf_size)
+{
+	char candidate[1024] = {};
+	if (requested[0] != '/' && requested[0] != '\\')
+		snprintf(candidate, sizeof(candidate), "%s", current_dir);
+
+	const char *cursor = requested;
+	char component[256];
+	int have_leaf = 0;
+	while (split_next_path_component(&cursor, component, sizeof(component)))
+	{
+		const char *next = cursor;
+		char ignored[256];
+		int has_more = split_next_path_component(&next, ignored, sizeof(ignored));
+
+		if (!has_more)
+		{
+			if (!valid_shared_leafname(component))
+				return 0;
+			snprintf(leaf, leaf_size, "%s", component);
+			have_leaf = 1;
+			break;
+		}
+
+		if (!strcmp(component, "."))
+		{
+			continue;
+		}
+		else if (!strcmp(component, ".."))
+		{
+			if (!pop_path_component(candidate))
+				return 0;
+		}
+		else
+		{
+			char basepath[1200];
+			const char *root = shared_basepath();
+			if (candidate[0])
+				snprintf(basepath, sizeof(basepath), "%s/%s", root, candidate);
+			else
+				snprintf(basepath, sizeof(basepath), "%s", root);
+
+			char resolved_component[256];
+			if (!resolve_shared_directory_component(basepath, component, resolved_component, sizeof(resolved_component)))
+				return 0;
+
+			if (!append_path_component(candidate, sizeof(candidate), resolved_component))
+				return 0;
+		}
+	}
+
+	if (!have_leaf)
+		return 0;
+
+	snprintf(dir, dir_size, "%s", candidate);
+	return 1;
+}
+
+static int resolve_shared_read_path(const char *requested, char *path, size_t path_size)
+{
+	char dir[1024];
+	char leaf[256];
+	if (!resolve_shared_path_parent(requested, dir, sizeof(dir), leaf, sizeof(leaf)))
+		return 0;
+
+	char basepath[1200];
+	const char *root = shared_basepath();
+	if (dir[0])
+		snprintf(basepath, sizeof(basepath), "%s/%s", root, dir);
+	else
+		snprintf(basepath, sizeof(basepath), "%s", root);
+
+	return resolve_shared_filename(basepath, leaf, path, path_size);
+}
+
+static int build_shared_write_path(const char *requested, char *path, size_t path_size)
+{
+	char dir[1024];
+	char leaf[256];
+	if (!resolve_shared_path_parent(requested, dir, sizeof(dir), leaf, sizeof(leaf)))
+		return 0;
+
+	if (!valid_shared_save_filename(leaf))
+		return 0;
+
+	const char *root = shared_basepath();
+	if (dir[0])
+		snprintf(path, path_size, "%s/%s/%s", root, dir, leaf);
+	else
+		snprintf(path, path_size, "%s/%s", root, leaf);
+
+	return 1;
 }
 
 static int append_path_component(char *path, size_t path_size, const char *component)
@@ -395,19 +495,11 @@ static uint32_t le24(const uint8_t *data)
 static void build_type_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
-	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
-
-	if (!valid_shared_filename(name))
-	{
-		snprintf(response, response_size, "BAD FILENAME\n");
-		return;
-	}
 
 	char path[1200];
-	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
+	if (!resolve_shared_read_path(name, path, sizeof(path)))
 	{
-		snprintf(response, response_size, "OPEN FAILED: %s\nBASE=%s\nPATH=%s/%s\n", name, basepath, basepath, name);
+		snprintf(response, response_size, "OPEN FAILED: %s\n", name);
 		append_request_hex(response, response_size, name);
 		return;
 	}
@@ -457,19 +549,11 @@ static void append_amsdos_name(char *response, size_t response_size, const uint8
 static void build_info_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
-	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
-
-	if (!valid_shared_filename(name))
-	{
-		snprintf(response, response_size, "BAD FILENAME\n");
-		return;
-	}
 
 	char path[1200];
-	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
+	if (!resolve_shared_read_path(name, path, sizeof(path)))
 	{
-		snprintf(response, response_size, "OPEN FAILED: %s\nBASE=%s\nPATH=%s/%s\n", name, basepath, basepath, name);
+		snprintf(response, response_size, "OPEN FAILED: %s\n", name);
 		append_request_hex(response, response_size, name);
 		return;
 	}
@@ -528,19 +612,11 @@ static void build_info_response(const char *name, char *response, size_t respons
 static void build_dump_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
-	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
-
-	if (!valid_shared_filename(name))
-	{
-		snprintf(response, response_size, "BAD FILENAME\n");
-		return;
-	}
 
 	char path[1200];
-	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
+	if (!resolve_shared_read_path(name, path, sizeof(path)))
 	{
-		snprintf(response, response_size, "OPEN FAILED: %s\nBASE=%s\nPATH=%s/%s\n", name, basepath, basepath, name);
+		snprintf(response, response_size, "OPEN FAILED: %s\n", name);
 		append_request_hex(response, response_size, name);
 		return;
 	}
@@ -633,13 +709,8 @@ static size_t build_load_response(const char *request, uint8_t *response, size_t
 		return 2;
 
 	const char *name = request + 7;
-	if (!valid_shared_filename(name))
-		return 2;
-
-	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
 	char path[1200];
-	if (!resolve_shared_filename(basepath, name, path, sizeof(path)))
+	if (!resolve_shared_read_path(name, path, sizeof(path)))
 		return 2;
 
 	FILE *file = fopen(path, "rb");
@@ -665,12 +736,7 @@ static size_t build_load_response(const char *request, uint8_t *response, size_t
 
 static int read_amsdos_header(const char *name, uint8_t *header, char *path, size_t path_size)
 {
-	if (!valid_shared_filename(name))
-		return 0;
-
-	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
-	if (!resolve_shared_filename(basepath, name, path, path_size))
+	if (!resolve_shared_read_path(name, path, path_size))
 		return 0;
 
 	FILE *file = fopen(path, "rb");
@@ -779,11 +845,6 @@ static void build_save_response(const char *request, char *response, size_t resp
 
 	memcpy(filename, name, name_len);
 	filename[name_len] = 0;
-	if (!valid_shared_save_filename(filename))
-	{
-		snprintf(response, response_size, "BAD FILENAME\n");
-		return;
-	}
 
 	const char *hex = separator + 1;
 	for (uint8_t i = 0; i < count; i++)
@@ -811,10 +872,12 @@ static void build_save_response(const char *request, char *response, size_t resp
 		}
 	}
 
-	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
 	char path[1200];
-	snprintf(path, sizeof(path), "%s/%s", basepath, filename);
+	if (!build_shared_write_path(filename, path, sizeof(path)))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
 
 	FILE *file = fopen(path, offset ? "r+b" : "wb");
 	if (!file)
