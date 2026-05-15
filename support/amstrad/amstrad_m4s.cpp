@@ -862,6 +862,38 @@ static void build_cd_response(const char *name, char *response, size_t response_
 	append_current_dir(response, response_size);
 }
 
+static void build_mkdir_response(const char *name, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	if (!valid_shared_save_filename(name))
+	{
+		snprintf(response, response_size, "BAD DIRECTORY\n");
+		return;
+	}
+
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
+
+	char path[1200];
+	snprintf(path, sizeof(path), "%s/%s", basepath, name);
+
+	struct stat st;
+	if (!stat(path, &st))
+	{
+		snprintf(response, response_size, S_ISDIR(st.st_mode) ? "DIRECTORY EXISTS\n" : "FILE EXISTS\n");
+		return;
+	}
+
+	if (mkdir(path, 0777))
+	{
+		snprintf(response, response_size, "MKDIR FAILED: %s\nERRNO=%d\n", name, errno);
+		return;
+	}
+
+	snprintf(response, response_size, "Created: %s\n", name);
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -904,6 +936,8 @@ static int process_host_request()
 			build_info_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "D:", 2))
 			build_dump_response(request + 2, response, sizeof(response));
+		else if (!strncmp(request, "K:", 2))
+			build_mkdir_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "S:", 2))
 			build_save_response(request, response, sizeof(response));
 		else
