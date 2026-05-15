@@ -2,6 +2,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -25,6 +26,9 @@
 #define M4S_LOAD_CHUNK_SIZE 512
 static unsigned long request_timer = 0;
 static char current_dir[1024] = {};
+static uint8_t pending_diskread_header[128] = {};
+static char pending_diskread_name[256] = {};
+static int pending_diskread_header_first_half = 0;
 
 static int is_amstrad_core()
 {
@@ -828,7 +832,7 @@ static void build_save_response(const char *request, char *response, size_t resp
 {
 	response[0] = 0;
 
-	if (request[0] != 'S' || request[1] != ':' || request[6] != ':' || request[9] != ':')
+	if ((request[0] != 'S' && request[0] != 'W') || request[1] != ':' || request[6] != ':' || request[9] != ':')
 	{
 		snprintf(response, response_size, "BAD SAVE REQUEST\n");
 		return;
@@ -894,7 +898,7 @@ static void build_save_response(const char *request, char *response, size_t resp
 		return;
 	}
 
-	FILE *file = fopen(path, offset ? "r+b" : "wb");
+	FILE *file = fopen(path, (request[0] == 'W' || offset) ? "r+b" : "wb");
 	if (!file)
 	{
 		snprintf(response, response_size, "SAVE OPEN FAILED: %s\nERRNO=%d\n", filename, errno);
@@ -916,6 +920,131 @@ static void build_save_response(const char *request, char *response, size_t resp
 		return;
 	}
 
+	snprintf(response, response_size, "OK\n");
+}
+
+static void build_prepend_header_response(const char *request, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	if (request[0] != 'Y' || request[1] != ':' || (request[2] != '0' && request[2] != '1') || request[3] != ':')
+	{
+		snprintf(response, response_size, "BAD HEADER REQUEST\n");
+		return;
+	}
+
+	const char *name = request + 4;
+	const char *separator = strchr(name, ':');
+	if (!separator)
+	{
+		snprintf(response, response_size, "BAD HEADER NAME\n");
+		return;
+	}
+
+	size_t name_len = separator - name;
+	char filename[256];
+	if (!name_len || name_len >= sizeof(filename))
+	{
+		snprintf(response, response_size, "BAD HEADER NAME\n");
+		return;
+	}
+
+	memcpy(filename, name, name_len);
+	filename[name_len] = 0;
+
+	const char *hex = separator + 1;
+	for (int i = 0; i < 64; i++)
+	{
+		if (!hex[i * 2] || !hex[i * 2 + 1] || !parse_hex8(hex + (i * 2), pending_diskread_header + (request[2] == '0' ? i : 64 + i)))
+		{
+			snprintf(response, response_size, "BAD HEADER DATA\n");
+			return;
+		}
+	}
+
+	if (request[2] == '0')
+	{
+		strcpy(pending_diskread_name, filename);
+		pending_diskread_header_first_half = 1;
+		snprintf(response, response_size, "OK\n");
+		return;
+	}
+
+	if (!pending_diskread_header_first_half || strcmp(pending_diskread_name, filename))
+	{
+		snprintf(response, response_size, "HEADER SEQUENCE ERROR\n");
+		return;
+	}
+
+	char path[1200];
+	if (!build_shared_write_path(filename, path, sizeof(path)))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
+
+	FILE *file = fopen(path, "rb");
+	if (!file)
+	{
+		snprintf(response, response_size, "HEADER OPEN FAILED: %s\nERRNO=%d\n", filename, errno);
+		return;
+	}
+
+	if (fseek(file, 0, SEEK_END))
+	{
+		fclose(file);
+		snprintf(response, response_size, "HEADER SEEK FAILED: %s\nERRNO=%d\n", filename, errno);
+		return;
+	}
+
+	long payload_size = ftell(file);
+	if (payload_size < 0)
+	{
+		fclose(file);
+		snprintf(response, response_size, "HEADER TELL FAILED: %s\nERRNO=%d\n", filename, errno);
+		return;
+	}
+	rewind(file);
+
+	uint8_t *payload = (uint8_t *)malloc((size_t)payload_size);
+	if (payload_size && !payload)
+	{
+		fclose(file);
+		snprintf(response, response_size, "HEADER ALLOC FAILED: %s\n", filename);
+		return;
+	}
+
+	size_t read = payload_size ? fread(payload, 1, (size_t)payload_size, file) : 0;
+	fclose(file);
+	if (read != (size_t)payload_size)
+	{
+		free(payload);
+		snprintf(response, response_size, "HEADER READ FAILED: %s\n", filename);
+		return;
+	}
+
+	file = fopen(path, "wb");
+	if (!file)
+	{
+		free(payload);
+		snprintf(response, response_size, "HEADER WRITE OPEN FAILED: %s\nERRNO=%d\n", filename, errno);
+		return;
+	}
+
+	size_t written = fwrite(pending_diskread_header, 1, sizeof(pending_diskread_header), file);
+	if (payload_size)
+		written += fwrite(payload, 1, (size_t)payload_size, file);
+	fclose(file);
+	free(payload);
+
+	if (written != sizeof(pending_diskread_header) + (size_t)payload_size)
+	{
+		snprintf(response, response_size, "HEADER WRITE FAILED: %s\n", filename);
+		return;
+	}
+
+	pending_diskread_header_first_half = 0;
+	pending_diskread_name[0] = 0;
 	snprintf(response, response_size, "OK\n");
 }
 
@@ -1274,13 +1403,17 @@ static int process_host_request()
 			build_mkdir_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "N:", 2))
 			build_rename_response(request, response, sizeof(response));
-		else if (!strncmp(request, "P:", 2))
-			build_copy_response(request, response, sizeof(response));
-		else if (!strncmp(request, "R:", 2))
-			build_remove_response(request + 2, response, sizeof(response));
-		else if (!strncmp(request, "F:", 2))
-			build_create_response(request + 2, response, sizeof(response));
-		else if (!strncmp(request, "S:", 2))
+			else if (!strncmp(request, "P:", 2))
+				build_copy_response(request, response, sizeof(response));
+			else if (!strncmp(request, "R:", 2))
+				build_remove_response(request + 2, response, sizeof(response));
+			else if (!strncmp(request, "F:", 2))
+				build_create_response(request + 2, response, sizeof(response));
+			else if (!strncmp(request, "Y:", 2))
+				build_prepend_header_response(request, response, sizeof(response));
+			else if (!strncmp(request, "S:", 2))
+				build_save_response(request, response, sizeof(response));
+		else if (!strncmp(request, "W:", 2))
 			build_save_response(request, response, sizeof(response));
 		else
 			build_type_response(request, response, sizeof(response));
