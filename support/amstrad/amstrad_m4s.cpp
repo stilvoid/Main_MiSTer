@@ -894,6 +894,73 @@ static void build_mkdir_response(const char *name, char *response, size_t respon
 	snprintf(response, response_size, "Created: %s\n", name);
 }
 
+static void build_rename_response(const char *request, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	if (request[0] != 'N' || request[1] != ':')
+	{
+		snprintf(response, response_size, "BAD RENAME REQUEST\n");
+		return;
+	}
+
+	const char *old_name = request + 2;
+	const char *separator = strchr(old_name, ':');
+	if (!separator)
+	{
+		snprintf(response, response_size, "BAD RENAME REQUEST\n");
+		return;
+	}
+
+	size_t old_len = separator - old_name;
+	char old_filename[256];
+	char new_filename[256];
+	if (!old_len || old_len >= sizeof(old_filename))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
+
+	memcpy(old_filename, old_name, old_len);
+	old_filename[old_len] = 0;
+	snprintf(new_filename, sizeof(new_filename), "%s", separator + 1);
+
+	if (!valid_shared_save_filename(old_filename) || !valid_shared_save_filename(new_filename))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
+
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
+
+	char old_path[1200];
+	char new_path[1200];
+	snprintf(old_path, sizeof(old_path), "%s/%s", basepath, old_filename);
+	snprintf(new_path, sizeof(new_path), "%s/%s", basepath, new_filename);
+
+	struct stat st;
+	if (stat(old_path, &st))
+	{
+		snprintf(response, response_size, "NO SUCH FILE: %s\n", old_filename);
+		return;
+	}
+
+	if (!stat(new_path, &st))
+	{
+		snprintf(response, response_size, "DESTINATION EXISTS: %s\n", new_filename);
+		return;
+	}
+
+	if (rename(old_path, new_path))
+	{
+		snprintf(response, response_size, "RENAME FAILED: %s\nERRNO=%d\n", old_filename, errno);
+		return;
+	}
+
+	snprintf(response, response_size, "Renamed: %s -> %s\n", old_filename, new_filename);
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -938,6 +1005,8 @@ static int process_host_request()
 			build_dump_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "K:", 2))
 			build_mkdir_response(request + 2, response, sizeof(response));
+		else if (!strncmp(request, "N:", 2))
+			build_rename_response(request, response, sizeof(response));
 		else if (!strncmp(request, "S:", 2))
 			build_save_response(request, response, sizeof(response));
 		else
