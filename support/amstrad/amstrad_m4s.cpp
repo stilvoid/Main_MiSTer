@@ -919,6 +919,35 @@ static void build_save_response(const char *request, char *response, size_t resp
 	snprintf(response, response_size, "OK\n");
 }
 
+static void build_create_response(const char *name, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	char path[1200];
+	if (!build_shared_write_path(name, path, sizeof(path)))
+	{
+		snprintf(response, response_size, "BAD DESTINATION\n");
+		return;
+	}
+
+	struct stat st;
+	if (!stat(path, &st))
+	{
+		snprintf(response, response_size, "DESTINATION EXISTS: %s\n", name);
+		return;
+	}
+
+	FILE *file = fopen(path, "wb");
+	if (!file)
+	{
+		snprintf(response, response_size, "CREATE FAILED: %s\nERRNO=%d\n", name, errno);
+		return;
+	}
+
+	fclose(file);
+	snprintf(response, response_size, "OK\n");
+}
+
 static void build_cd_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
@@ -1249,6 +1278,8 @@ static int process_host_request()
 			build_copy_response(request, response, sizeof(response));
 		else if (!strncmp(request, "R:", 2))
 			build_remove_response(request + 2, response, sizeof(response));
+		else if (!strncmp(request, "F:", 2))
+			build_create_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "S:", 2))
 			build_save_response(request, response, sizeof(response));
 		else
@@ -1267,7 +1298,7 @@ void amstrad_m4s_poll()
 
 	if (!request_timer || CheckTimer(request_timer))
 	{
-		request_timer = GetTimer(50);
+		request_timer = GetTimer(5);
 		if (process_host_request())
 			return;
 	}
