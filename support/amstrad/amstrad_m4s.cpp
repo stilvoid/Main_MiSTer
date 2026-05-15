@@ -1096,6 +1096,107 @@ static void build_remove_response(const char *name, char *response, size_t respo
 	snprintf(response, response_size, "Removed: %s\n", name);
 }
 
+static void build_copy_response(const char *request, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	if (request[0] != 'P' || request[1] != ':')
+	{
+		snprintf(response, response_size, "BAD COPY REQUEST\n");
+		return;
+	}
+
+	const char *source = request + 2;
+	const char *separator = strchr(source, ':');
+	if (!separator)
+	{
+		snprintf(response, response_size, "BAD COPY REQUEST\n");
+		return;
+	}
+
+	size_t source_len = separator - source;
+	char source_name[256];
+	char dest_name[256];
+	if (!source_len || source_len >= sizeof(source_name))
+	{
+		snprintf(response, response_size, "BAD SOURCE\n");
+		return;
+	}
+
+	memcpy(source_name, source, source_len);
+	source_name[source_len] = 0;
+	snprintf(dest_name, sizeof(dest_name), "%s", separator + 1);
+
+	char source_path[1200];
+	char dest_path[1200];
+	if (!resolve_shared_read_path(source_name, source_path, sizeof(source_path)))
+	{
+		snprintf(response, response_size, "NO SUCH FILE: %s\n", source_name);
+		return;
+	}
+
+	if (!build_shared_write_path(dest_name, dest_path, sizeof(dest_path)))
+	{
+		snprintf(response, response_size, "BAD DESTINATION\n");
+		return;
+	}
+
+	struct stat st;
+	if (!stat(source_path, &st) && S_ISDIR(st.st_mode))
+	{
+		snprintf(response, response_size, "IS A DIRECTORY: %s\n", source_name);
+		return;
+	}
+
+	if (!stat(dest_path, &st))
+	{
+		snprintf(response, response_size, "DESTINATION EXISTS: %s\n", dest_name);
+		return;
+	}
+
+	FILE *src = fopen(source_path, "rb");
+	if (!src)
+	{
+		snprintf(response, response_size, "OPEN FAILED: %s\nERRNO=%d\n", source_name, errno);
+		return;
+	}
+
+	FILE *dst = fopen(dest_path, "wb");
+	if (!dst)
+	{
+		fclose(src);
+		snprintf(response, response_size, "CREATE FAILED: %s\nERRNO=%d\n", dest_name, errno);
+		return;
+	}
+
+	uint8_t buffer[1024];
+	size_t read_count;
+	while ((read_count = fread(buffer, 1, sizeof(buffer), src)) > 0)
+	{
+		if (fwrite(buffer, 1, read_count, dst) != read_count)
+		{
+			fclose(dst);
+			fclose(src);
+			unlink(dest_path);
+			snprintf(response, response_size, "COPY WRITE FAILED: %s\n", dest_name);
+			return;
+		}
+	}
+
+	int read_error = ferror(src);
+	fclose(dst);
+	fclose(src);
+
+	if (read_error)
+	{
+		unlink(dest_path);
+		snprintf(response, response_size, "COPY READ FAILED: %s\n", source_name);
+		return;
+	}
+
+	snprintf(response, response_size, "Copied: %s -> %s\n", source_name, dest_name);
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -1144,6 +1245,8 @@ static int process_host_request()
 			build_mkdir_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "N:", 2))
 			build_rename_response(request, response, sizeof(response));
+		else if (!strncmp(request, "P:", 2))
+			build_copy_response(request, response, sizeof(response));
 		else if (!strncmp(request, "R:", 2))
 			build_remove_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "S:", 2))
