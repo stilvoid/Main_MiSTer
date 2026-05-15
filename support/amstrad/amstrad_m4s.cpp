@@ -70,12 +70,17 @@ static void shared_current_path(char *path, size_t path_size)
 		snprintf(path, path_size, "%s", basepath);
 }
 
-static void append_current_dir(char *response, size_t response_size)
+static void append_dir(char *response, size_t response_size, const char *dir)
 {
 	size_t used = strlen(response);
 	if (used >= response_size - 1) return;
 
-	snprintf(response + used, response_size - used, "CWD: /%s\n", current_dir);
+	snprintf(response + used, response_size - used, "CWD: /%s\n", dir);
+}
+
+static void append_current_dir(char *response, size_t response_size)
+{
+	append_dir(response, response_size, current_dir);
 }
 
 static void append_listing(char *listing, size_t listing_size, const char *name, int is_dir)
@@ -86,10 +91,15 @@ static void append_listing(char *listing, size_t listing_size, const char *name,
 	snprintf(listing + used, listing_size - used, "%s%s\n", name, is_dir ? "/" : "");
 }
 
-static void build_listing(char *listing, size_t listing_size)
+static void build_listing_for_dir(const char *shared_dir, char *listing, size_t listing_size)
 {
 	char basepath[1200];
-	shared_current_path(basepath, sizeof(basepath));
+	const char *root = shared_basepath();
+	if (shared_dir[0])
+		snprintf(basepath, sizeof(basepath), "%s/%s", root, shared_dir);
+	else
+		snprintf(basepath, sizeof(basepath), "%s", root);
+
 	DIR *dir = opendir(basepath);
 
 	listing[0] = 0;
@@ -100,7 +110,7 @@ static void build_listing(char *listing, size_t listing_size)
 	}
 
 	append_listing(listing, listing_size, "M4S SHARED", 0);
-	append_current_dir(listing, listing_size);
+	append_dir(listing, listing_size, shared_dir);
 
 	struct dirent *entry;
 	while ((entry = readdir(dir)))
@@ -117,6 +127,11 @@ static void build_listing(char *listing, size_t listing_size)
 	}
 
 	closedir(dir);
+}
+
+static void build_listing(char *listing, size_t listing_size)
+{
+	build_listing_for_dir(current_dir, listing, listing_size);
 }
 
 static void send_response(const uint8_t *data, size_t len)
@@ -926,6 +941,24 @@ static void build_cd_response(const char *name, char *response, size_t response_
 	append_current_dir(response, response_size);
 }
 
+static void build_list_response(const char *name, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	char resolved[1024];
+	if (!name[0])
+	{
+		snprintf(resolved, sizeof(resolved), "%s", current_dir);
+	}
+	else if (!resolve_shared_relative_dir(name, resolved, sizeof(resolved)))
+	{
+		snprintf(response, response_size, "NO SUCH DIRECTORY: %s\n", name);
+		return;
+	}
+
+	build_listing_for_dir(resolved, response, response_size);
+}
+
 static void build_mkdir_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
@@ -1101,6 +1134,8 @@ static int process_host_request()
 			build_listing(response, sizeof(response));
 		else if (!strncmp(request, "C:", 2))
 			build_cd_response(request + 2, response, sizeof(response));
+		else if (!strncmp(request, "G:", 2))
+			build_list_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "I:", 2))
 			build_info_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "D:", 2))
