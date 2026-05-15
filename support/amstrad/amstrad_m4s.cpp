@@ -961,6 +961,44 @@ static void build_rename_response(const char *request, char *response, size_t re
 	snprintf(response, response_size, "Renamed: %s -> %s\n", old_filename, new_filename);
 }
 
+static void build_remove_response(const char *name, char *response, size_t response_size)
+{
+	response[0] = 0;
+
+	if (!valid_shared_save_filename(name))
+	{
+		snprintf(response, response_size, "BAD FILENAME\n");
+		return;
+	}
+
+	char basepath[1200];
+	shared_current_path(basepath, sizeof(basepath));
+
+	char path[1200];
+	snprintf(path, sizeof(path), "%s/%s", basepath, name);
+
+	struct stat st;
+	if (stat(path, &st))
+	{
+		snprintf(response, response_size, "NO SUCH FILE: %s\n", name);
+		return;
+	}
+
+	if (S_ISDIR(st.st_mode))
+	{
+		snprintf(response, response_size, "IS A DIRECTORY: %s\n", name);
+		return;
+	}
+
+	if (unlink(path))
+	{
+		snprintf(response, response_size, "REMOVE FAILED: %s\nERRNO=%d\n", name, errno);
+		return;
+	}
+
+	snprintf(response, response_size, "Removed: %s\n", name);
+}
+
 static int process_host_request()
 {
 	uint16_t status = request_status();
@@ -1007,6 +1045,8 @@ static int process_host_request()
 			build_mkdir_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "N:", 2))
 			build_rename_response(request, response, sizeof(response));
+		else if (!strncmp(request, "R:", 2))
+			build_remove_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "S:", 2))
 			build_save_response(request, response, sizeof(response));
 		else
