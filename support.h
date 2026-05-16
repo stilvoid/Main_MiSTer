@@ -26,7 +26,7 @@
 #include "support/megadrive/mdplus.h"
 
 // Amstrad support
-#include "support/amstrad/amstrad_m4s.h"
+#include "support/amstrad/amstrad_cms.h"
 
 // N64  support
 #include "support/n64/n64.h"

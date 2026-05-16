@@ -12,18 +12,18 @@
 #include "../../hardware.h"
 #include "../../spi.h"
 #include "../../user_io.h"
-#include "amstrad_m4s.h"
+#include "amstrad_cms.h"
 
-#define CMD_M4S_DIR_BEGIN 0x70
-#define CMD_M4S_DIR_WRITE 0x71
-#define CMD_M4S_REQ_STATUS 0x72
-#define CMD_M4S_REQ_READ 0x73
-#define CMD_M4S_REQ_ACK 0x74
-#define CMD_M4S_RESP_DONE 0x77
+#define CMD_CMS_DIR_BEGIN 0x70
+#define CMD_CMS_DIR_WRITE 0x71
+#define CMD_CMS_REQ_STATUS 0x72
+#define CMD_CMS_REQ_READ 0x73
+#define CMD_CMS_REQ_ACK 0x74
+#define CMD_CMS_RESP_DONE 0x77
 
-#define M4S_INDEX_SIZE 2048
-#define M4S_REQUEST_SIZE 256
-#define M4S_LOAD_CHUNK_SIZE 512
+#define CMS_INDEX_SIZE 2048
+#define CMS_REQUEST_SIZE 256
+#define CMS_LOAD_CHUNK_SIZE 512
 static unsigned long request_timer = 0;
 static char current_dir[1024] = {};
 static uint8_t pending_diskread_header[128] = {};
@@ -113,7 +113,7 @@ static void build_listing_for_dir(const char *shared_dir, char *listing, size_t 
 		return;
 	}
 
-	append_listing(listing, listing_size, "M4S SHARED", 0);
+	append_listing(listing, listing_size, "CPC MISTER SHARE", 0);
 	append_dir(listing, listing_size, shared_dir);
 
 	struct dirent *entry;
@@ -140,29 +140,29 @@ static void build_listing(char *listing, size_t listing_size)
 
 static void send_response(const uint8_t *data, size_t len)
 {
-	spi_uio_cmd(CMD_M4S_DIR_BEGIN);
+	spi_uio_cmd(CMD_CMS_DIR_BEGIN);
 
-	spi_uio_cmd_cont(CMD_M4S_DIR_WRITE);
+	spi_uio_cmd_cont(CMD_CMS_DIR_WRITE);
 
 	for (size_t i = 0; i < len; i++)
 		spi_w(data[i]);
 
 	DisableIO();
 
-	spi_uio_cmd(CMD_M4S_RESP_DONE);
+	spi_uio_cmd(CMD_CMS_RESP_DONE);
 }
 
 static void send_listing(const char *listing)
 {
 	size_t len = strlen(listing);
-	if (len > M4S_INDEX_SIZE - 1) len = M4S_INDEX_SIZE - 1;
+	if (len > CMS_INDEX_SIZE - 1) len = CMS_INDEX_SIZE - 1;
 
 	send_response((const uint8_t *)listing, len + 1);
 }
 
 static uint16_t request_status()
 {
-	spi_uio_cmd_cont(CMD_M4S_REQ_STATUS);
+	spi_uio_cmd_cont(CMD_CMS_REQ_STATUS);
 	uint16_t status = spi_w(0);
 	DisableIO();
 	return status;
@@ -170,7 +170,7 @@ static uint16_t request_status()
 
 static uint8_t request_byte(uint8_t addr)
 {
-	spi_uio_cmd_cont(CMD_M4S_REQ_READ);
+	spi_uio_cmd_cont(CMD_CMS_REQ_READ);
 	uint16_t data = spi_w(addr);
 	DisableIO();
 	return data & 0xFF;
@@ -178,7 +178,7 @@ static uint8_t request_byte(uint8_t addr)
 
 static void request_ack()
 {
-	spi_uio_cmd(CMD_M4S_REQ_ACK);
+	spi_uio_cmd(CMD_CMS_REQ_ACK);
 }
 
 static int valid_shared_leafname(const char *name)
@@ -780,7 +780,7 @@ static size_t build_load_response(const char *request, uint8_t *response, size_t
 		return 2;
 	}
 
-	size_t max_count = M4S_LOAD_CHUNK_SIZE;
+	size_t max_count = CMS_LOAD_CHUNK_SIZE;
 	if (max_count > response_size - 2) max_count = response_size - 2;
 
 	size_t count = fread(response + 2, 1, max_count, file);
@@ -867,7 +867,7 @@ static size_t build_header_load_response(const char *request, uint8_t *response,
 		return 7;
 	}
 
-	size_t max_count = M4S_LOAD_CHUNK_SIZE;
+	size_t max_count = CMS_LOAD_CHUNK_SIZE;
 	size_t remaining = logical_len - offset;
 	if (max_count > remaining) max_count = remaining;
 	if (max_count > response_size - 7) max_count = response_size - 7;
@@ -924,7 +924,7 @@ static size_t build_disk_write_response(const char *request, uint8_t *response, 
 		return 137;
 	}
 
-	size_t max_count = M4S_LOAD_CHUNK_SIZE;
+	size_t max_count = CMS_LOAD_CHUNK_SIZE;
 	size_t remaining = logical_len - offset;
 	if (max_count > remaining) max_count = remaining;
 	if (max_count > response_size - 137) max_count = response_size - 137;
@@ -1493,46 +1493,46 @@ static int process_host_request()
 	if (!(status & 1)) return 0;
 
 	uint16_t len = status >> 8;
-	if (len > M4S_REQUEST_SIZE - 1) len = M4S_REQUEST_SIZE - 1;
+	if (len > CMS_REQUEST_SIZE - 1) len = CMS_REQUEST_SIZE - 1;
 
-	char request[M4S_REQUEST_SIZE] = {};
+	char request[CMS_REQUEST_SIZE] = {};
 	for (uint16_t i = 0; i < len; i++)
 	{
 		request[i] = (char)request_byte((uint8_t)i);
 		if (!request[i]) break;
 	}
-	request[M4S_REQUEST_SIZE - 1] = 0;
+	request[CMS_REQUEST_SIZE - 1] = 0;
 	normalize_shared_filename(request);
 
 	request_ack();
 
 	if (!strncmp(request, "H:", 2))
 	{
-		uint8_t response[M4S_INDEX_SIZE];
+		uint8_t response[CMS_INDEX_SIZE];
 		size_t response_len = build_header_load_response(request, response, sizeof(response));
 		send_response(response, response_len);
 	}
 	else if (!strncmp(request, "O:", 2))
 	{
-		uint8_t response[M4S_INDEX_SIZE];
+		uint8_t response[CMS_INDEX_SIZE];
 		size_t response_len = build_disk_write_response(request, response, sizeof(response));
 		send_response(response, response_len);
 	}
 	else if (!strncmp(request, "L:", 2))
 	{
-		uint8_t response[M4S_INDEX_SIZE];
+		uint8_t response[CMS_INDEX_SIZE];
 		size_t response_len = build_load_response(request, response, sizeof(response));
 		send_response(response, response_len);
 	}
 	else if (!strncmp(request, "X:", 2))
 	{
-		uint8_t response[M4S_INDEX_SIZE];
+		uint8_t response[CMS_INDEX_SIZE];
 		size_t response_len = build_exec_check_response(request, response, sizeof(response));
 		send_response(response, response_len);
 	}
 	else
 	{
-		char response[M4S_INDEX_SIZE];
+		char response[CMS_INDEX_SIZE];
 		if (len == 0)
 			build_listing(response, sizeof(response));
 		else if (!strncmp(request, "C:", 2))
@@ -1568,7 +1568,7 @@ static int process_host_request()
 	return 1;
 }
 
-void amstrad_m4s_poll()
+void amstrad_cms_poll()
 {
 	if (!is_amstrad_core())
 		return;
