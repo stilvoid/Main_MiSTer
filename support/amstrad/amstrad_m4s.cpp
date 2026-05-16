@@ -826,6 +826,62 @@ static size_t build_header_load_response(const char *request, uint8_t *response,
 	return count + 7;
 }
 
+static size_t build_disk_write_response(const char *request, uint8_t *response, size_t response_size)
+{
+	for (int i = 0; i < 9; i++)
+		response[i] = 0;
+
+	if (request[0] != 'O' || request[1] != ':' || request[6] != ':')
+		return 9;
+
+	uint16_t offset = 0;
+	if (!parse_hex16(request + 2, &offset))
+		return 9;
+
+	const char *name = request + 7;
+	uint8_t header[128] = {};
+	char path[1200];
+	if (!read_amsdos_header(name, header, path, sizeof(path)))
+		return 9;
+
+	uint16_t logical_len = le16(header + 24);
+	uint16_t load_addr = le16(header + 21);
+	uint16_t entry_addr = le16(header + 26);
+
+	response[2] = logical_len & 0xFF;
+	response[3] = logical_len >> 8;
+	response[4] = load_addr & 0xFF;
+	response[5] = load_addr >> 8;
+	response[6] = entry_addr & 0xFF;
+	response[7] = entry_addr >> 8;
+	response[8] = header[18];
+
+	if (offset >= logical_len)
+		return 9;
+
+	FILE *file = fopen(path, "rb");
+	if (!file)
+		return 9;
+
+	if (fseek(file, 128 + offset, SEEK_SET))
+	{
+		fclose(file);
+		return 9;
+	}
+
+	size_t max_count = M4S_LOAD_CHUNK_SIZE;
+	size_t remaining = logical_len - offset;
+	if (max_count > remaining) max_count = remaining;
+	if (max_count > response_size - 9) max_count = response_size - 9;
+
+	size_t count = fread(response + 9, 1, max_count, file);
+	fclose(file);
+
+	response[0] = count & 0xFF;
+	response[1] = count >> 8;
+	return count + 9;
+}
+
 static void build_save_response(const char *request, char *response, size_t response_size)
 {
 	response[0] = 0;
@@ -1376,6 +1432,12 @@ static int process_host_request()
 	{
 		uint8_t response[M4S_INDEX_SIZE];
 		size_t response_len = build_header_load_response(request, response, sizeof(response));
+		send_response(response, response_len);
+	}
+	else if (!strncmp(request, "O:", 2))
+	{
+		uint8_t response[M4S_INDEX_SIZE];
+		size_t response_len = build_disk_write_response(request, response, sizeof(response));
 		send_response(response, response_len);
 	}
 	else if (!strncmp(request, "L:", 2))
