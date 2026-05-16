@@ -214,18 +214,6 @@ static void normalize_shared_filename(char *name)
 		name[--len] = 0;
 }
 
-static void append_request_hex(char *response, size_t response_size, const char *name)
-{
-	size_t used = strlen(response);
-	if (used >= response_size - 1) return;
-
-	used += snprintf(response + used, response_size - used, "HEX=");
-	for (size_t i = 0; name[i] && used < response_size - 4; i++)
-		used += snprintf(response + used, response_size - used, "%02X", (unsigned char)name[i]);
-
-	snprintf(response + used, response_size - used, "\n");
-}
-
 static void append_hex_byte(char *response, size_t response_size, uint8_t value)
 {
 	static const char hex[] = "0123456789ABCDEF";
@@ -564,15 +552,13 @@ static void build_type_response(const char *name, char *response, size_t respons
 	if (!resolve_shared_read_path(name, path, sizeof(path)))
 	{
 		snprintf(response, response_size, "OPEN FAILED: %s\n", name);
-		append_request_hex(response, response_size, name);
 		return;
 	}
 
 	FILE *file = fopen(path, "rb");
 	if (!file)
 	{
-		snprintf(response, response_size, "OPEN FAILED: %s\nPATH=%s\nERRNO=%d\n", name, path, errno);
-		append_request_hex(response, response_size, name);
+		snprintf(response, response_size, "OPEN FAILED: %s\nERRNO=%d\n", name, errno);
 		return;
 	}
 
@@ -618,7 +604,6 @@ static void build_info_response(const char *name, char *response, size_t respons
 	if (!resolve_shared_read_path(name, path, sizeof(path)))
 	{
 		snprintf(response, response_size, "OPEN FAILED: %s\n", name);
-		append_request_hex(response, response_size, name);
 		return;
 	}
 
@@ -628,8 +613,7 @@ static void build_info_response(const char *name, char *response, size_t respons
 	FILE *file = fopen(path, "rb");
 	if (!file)
 	{
-		snprintf(response, response_size, "OPEN FAILED: %s\nPATH=%s\nERRNO=%d\n", name, path, errno);
-		append_request_hex(response, response_size, name);
+		snprintf(response, response_size, "OPEN FAILED: %s\nERRNO=%d\n", name, errno);
 		return;
 	}
 
@@ -674,15 +658,13 @@ static void build_dump_response(const char *name, char *response, size_t respons
 	if (!resolve_shared_read_path(name, path, sizeof(path)))
 	{
 		snprintf(response, response_size, "OPEN FAILED: %s\n", name);
-		append_request_hex(response, response_size, name);
 		return;
 	}
 
 	FILE *file = fopen(path, "rb");
 	if (!file)
 	{
-		snprintf(response, response_size, "OPEN FAILED: %s\nPATH=%s\nERRNO=%d\n", name, path, errno);
-		append_request_hex(response, response_size, name);
+		snprintf(response, response_size, "OPEN FAILED: %s\nERRNO=%d\n", name, errno);
 		return;
 	}
 
