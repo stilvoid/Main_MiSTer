@@ -810,6 +810,22 @@ static int read_amsdos_header(const char *name, uint8_t *header, char *path, siz
 	return valid_amsdos_header(header, file_size);
 }
 
+static size_t build_exec_check_response(const char *request, uint8_t *response, size_t response_size)
+{
+	if (response_size < 1)
+		return 0;
+
+	response[0] = 0;
+
+	if (request[0] != 'X' || request[1] != ':')
+		return 1;
+
+	uint8_t header[128] = {};
+	char path[1200];
+	response[0] = read_amsdos_header(request + 2, header, path, sizeof(path)) ? 1 : 0;
+	return 1;
+}
+
 static size_t build_header_load_response(const char *request, uint8_t *response, size_t response_size)
 {
 	for (int i = 0; i < 7; i++)
@@ -1508,6 +1524,12 @@ static int process_host_request()
 		size_t response_len = build_load_response(request, response, sizeof(response));
 		send_response(response, response_len);
 	}
+	else if (!strncmp(request, "X:", 2))
+	{
+		uint8_t response[M4S_INDEX_SIZE];
+		size_t response_len = build_exec_check_response(request, response, sizeof(response));
+		send_response(response, response_len);
+	}
 	else
 	{
 		char response[M4S_INDEX_SIZE];
@@ -1525,16 +1547,16 @@ static int process_host_request()
 			build_mkdir_response(request + 2, response, sizeof(response));
 		else if (!strncmp(request, "N:", 2))
 			build_rename_response(request, response, sizeof(response));
-			else if (!strncmp(request, "P:", 2))
-				build_copy_response(request, response, sizeof(response));
-			else if (!strncmp(request, "R:", 2))
-				build_remove_response(request + 2, response, sizeof(response));
-			else if (!strncmp(request, "F:", 2))
-				build_create_response(request + 2, response, sizeof(response));
-			else if (!strncmp(request, "Y:", 2))
-				build_prepend_header_response(request, response, sizeof(response));
-			else if (!strncmp(request, "S:", 2))
-				build_save_response(request, response, sizeof(response));
+		else if (!strncmp(request, "P:", 2))
+			build_copy_response(request, response, sizeof(response));
+		else if (!strncmp(request, "R:", 2))
+			build_remove_response(request + 2, response, sizeof(response));
+		else if (!strncmp(request, "F:", 2))
+			build_create_response(request + 2, response, sizeof(response));
+		else if (!strncmp(request, "Y:", 2))
+			build_prepend_header_response(request, response, sizeof(response));
+		else if (!strncmp(request, "S:", 2))
+			build_save_response(request, response, sizeof(response));
 		else if (!strncmp(request, "W:", 2))
 			build_save_response(request, response, sizeof(response));
 		else
