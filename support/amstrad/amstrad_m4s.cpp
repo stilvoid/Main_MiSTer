@@ -237,6 +237,14 @@ static void append_hex_byte(char *response, size_t response_size, uint8_t value)
 	response[used] = 0;
 }
 
+static const char *path_leaf(const char *path)
+{
+	const char *slash = strrchr(path, '/');
+	const char *backslash = strrchr(path, '\\');
+	const char *leaf = slash > backslash ? slash : backslash;
+	return leaf ? leaf + 1 : path;
+}
+
 static int append_path_component(char *path, size_t path_size, const char *component);
 static int pop_path_component(char *path);
 static int split_next_path_component(const char **cursor, char *component, size_t component_size);
@@ -511,6 +519,43 @@ static uint32_t le24(const uint8_t *data)
 	return data[0] | (data[1] << 8) | (data[2] << 16);
 }
 
+static int valid_amsdos_name_char(uint8_t value)
+{
+	return value == ' ' || value == '$' || value == '#' || value == '@' ||
+	       value == '_' || value == '-' || value == '.' ||
+	       (value >= '0' && value <= '9') ||
+	       (value >= 'A' && value <= 'Z');
+}
+
+static int valid_amsdos_header(const uint8_t *header, long file_size)
+{
+	if (header[0] != 0) return 0;
+	if (header[18] > 2) return 0;
+
+	for (int i = 1; i < 12; i++)
+	{
+		if (!valid_amsdos_name_char(header[i]))
+			return 0;
+	}
+
+	uint16_t checksum = 0;
+	for (int i = 0; i <= 66; i++)
+		checksum += header[i];
+
+	if (checksum != le16(header + 67))
+		return 0;
+
+	if (file_size >= 128)
+	{
+		uint32_t logical_len = le16(header + 24);
+		uint32_t payload_size = (uint32_t)file_size - 128;
+		if (logical_len > payload_size)
+			return 0;
+	}
+
+	return 1;
+}
+
 static void build_type_response(const char *name, char *response, size_t response_size)
 {
 	response[0] = 0;
@@ -601,12 +646,7 @@ static void build_info_response(const char *name, char *response, size_t respons
 		return;
 	}
 
-	uint16_t checksum = 0;
-	for (int i = 0; i <= 66; i++)
-		checksum += header[i];
-
-	uint16_t stored_checksum = le16(header + 67);
-	if (checksum != stored_checksum)
+	if (!valid_amsdos_header(header, file_size))
 	{
 		size_t used = strlen(response);
 		snprintf(response + used, response_size - used, "AMSDOS: NO HEADER\n");
@@ -765,11 +805,9 @@ static int read_amsdos_header(const char *name, uint8_t *header, char *path, siz
 	if (count != 128)
 		return 0;
 
-	uint16_t checksum = 0;
-	for (int i = 0; i <= 66; i++)
-		checksum += header[i];
-
-	return checksum == le16(header + 67);
+	struct stat st;
+	long file_size = !stat(path, &st) ? (long)st.st_size : -1;
+	return valid_amsdos_header(header, file_size);
 }
 
 static size_t build_header_load_response(const char *request, uint8_t *response, size_t response_size)
@@ -1363,8 +1401,31 @@ static void build_copy_response(const char *request, char *response, size_t resp
 
 	if (!stat(dest_path, &st))
 	{
-		snprintf(response, response_size, "DESTINATION EXISTS: %s\n", dest_name);
-		return;
+		if (S_ISDIR(st.st_mode))
+		{
+			const char *leaf = path_leaf(source_path);
+			if (!valid_shared_save_filename(leaf) ||
+			    strlen(dest_path) + 1 + strlen(leaf) >= sizeof(dest_path))
+			{
+				snprintf(response, response_size, "BAD DESTINATION\n");
+				return;
+			}
+
+			strcat(dest_path, "/");
+			strcat(dest_path, leaf);
+			snprintf(dest_name, sizeof(dest_name), "%s/%s", separator + 1, leaf);
+
+			if (!stat(dest_path, &st))
+			{
+				snprintf(response, response_size, "DESTINATION EXISTS: %s\n", dest_name);
+				return;
+			}
+		}
+		else
+		{
+			snprintf(response, response_size, "DESTINATION EXISTS: %s\n", dest_name);
+			return;
+		}
 	}
 
 	FILE *src = fopen(source_path, "rb");
