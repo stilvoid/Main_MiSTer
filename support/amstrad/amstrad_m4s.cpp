@@ -609,9 +609,7 @@ static void build_info_response(const char *name, char *response, size_t respons
 	if (checksum != stored_checksum)
 	{
 		size_t used = strlen(response);
-		snprintf(response + used, response_size - used,
-		         "AMSDOS: NO HEADER\nCHECKSUM: %04X EXPECTED %04X\n",
-		         stored_checksum, checksum);
+		snprintf(response + used, response_size - used, "AMSDOS: NO HEADER\n");
 		return;
 	}
 
