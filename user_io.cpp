@@ -3152,6 +3152,7 @@ void user_io_poll()
 	{
 		if (is_st()) tos_poll();
 		if (is_snes() || is_sgb()) snes_poll();
+		amstrad_cms_poll();
 		mdplus_poll(); // MD+ CDDA poll
 
 		for (int i = 0; i < 4; i++)
